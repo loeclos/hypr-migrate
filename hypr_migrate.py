@@ -1197,7 +1197,7 @@ class LuaEmitter:
             if ws.gaps_out is not None:
                 fields.append(f"gaps_out = {ws.gaps_out}")
             if ws.border is not None:
-                fields.append(f"border = {ws.border}")
+                fields.append(f"border_size = {ws.border}")
             if ws.decorate is not None:
                 fields.append(f"decorate = {str(ws.decorate).lower()}")
             if ws.persistent is not None:
@@ -1239,30 +1239,26 @@ class LuaEmitter:
 
             match_str = ", ".join(match_fields) if match_fields else primary.match_raw
 
-            # If merged, combine effects
-            if len(group) > 1:
-                effects: list[str] = []
-                for wr in group:
-                    val_str, _, _, _ = normalize_val(wr.effect, wr.loc.line)
-                    effects.append(f"{val_str}")
-                effect_str = ", ".join(effects)
-                if len(group) <= 3:
-                    self._w(f"hl.window_rule({{ match = {{ {match_str} }}, effects = {{ {effect_str} }} }})")
+            # Parse all effects into (key, value) pairs
+            all_pairs: list[tuple[str, str]] = []
+            for wr in group:
+                all_pairs.extend(_parse_window_rule_effect(wr.effect))
+
+            eff_fields = ", ".join(f"{k} = {v}" for k, v in all_pairs)
+            if len(group) == 1:
+                if match_fields:
+                    self._w(f"hl.window_rule({{ match = {{ {match_str} }}, {eff_fields} }})")
+                else:
+                    self._w(f'hl.window_rule({{ match = "{primary.match_raw}", {eff_fields} }})')
+            else:
+                if len(group) <= 3 and len(all_pairs) <= 4:
+                    self._w(f"hl.window_rule({{ match = {{ {match_str} }}, {eff_fields} }})")
                 else:
                     self._w(f"hl.window_rule({{")
                     self._w(f"    match = {{ {match_str} }},")
-                    eff_lines = ",\n".join(f"        {e}" for e in effects)
-                    self._w(f"    effects = {{")
-                    for e in effects:
-                        self._w(f"        {e},")
-                    self._w(f"    }}")
+                    for k, v in all_pairs:
+                        self._w(f"    {k} = {v},")
                     self._w(f"}})")
-            else:
-                val_str, _, _, _ = normalize_val(primary.effect, primary.loc.line)
-                if match_fields:
-                    self._w(f"hl.window_rule({{ match = {{ {match_str} }}, effect = {val_str} }})")
-                else:
-                    self._w(f'hl.window_rule({{ match = "{primary.match_raw}", effect = {val_str} }})')
         if self.ir.window_rules:
             self._w()
 
@@ -1334,7 +1330,11 @@ class LuaEmitter:
 
         self._w(f"-- PATTERN: {len(run)} sequential binds collapsed to loop")
         self._w(f"for i = {start_num}, {end_num} do")
-        self._w(f"    hl.bind(\"{mods}, \" .. (i % 10), hl.dsp.{disp}({{ i }}))")
+        disp_fn = _dispatcher_to_lua(disp)
+        if disp.lower() in ("workspace", "movetoworkspace"):
+            self._w(f"    hl.bind(\"{mods} + \" .. (i % 10), hl.dsp.{disp_fn}({{ workspace = tostring(i % 10) }}))")
+        else:
+            self._w(f"    hl.bind(\"{mods} + \" .. (i % 10), hl.dsp.{disp_fn}({{ i }}))")
         self._w(f"end")
         self._w()
 
@@ -1363,8 +1363,8 @@ class LuaEmitter:
         for a in b.annotations:
             self._w(f"-- {a.kind}: {a.message}")
 
-        # Build mods string (use comma format)
-        mod_str = f'"{b.mods}, {b.key}"'
+        # Build mods string (use plus format per wiki)
+        mod_str = f'"{b.mods} + {b.key}"'
         opts = self._bind_opts(b)
 
         if b.is_unbind:
@@ -1383,7 +1383,10 @@ class LuaEmitter:
             self._w(f"-- was: bind = {b.mods}, {b.key}, {b.dispatcher}, {b.param}")
         else:
             if b.param:
-                self._w(f"hl.bind({mod_str}, hl.dsp.{disp_fn}({{ {_fmt_dsp_param(b.param)} }})){opts}")
+                param_str = _fmt_dsp_param(b.param)
+                if b.dispatcher.lower() in ("workspace", "movetoworkspace"):
+                    param_str = f'workspace = "{b.param}"'
+                self._w(f"hl.bind({mod_str}, hl.dsp.{disp_fn}({{ {param_str} }})){opts}")
             else:
                 self._w(f"hl.bind({mod_str}, hl.dsp.{disp_fn}()){opts}")
 
@@ -1418,7 +1421,7 @@ class LuaEmitter:
                 self._w(f"-- {a.kind}: {a.message}")
             self._w(f"hl.curve(\"{b.name}\", {{")
             self._w(f"    type = \"bezier\",")
-            self._w(f"    points = {{ {b.x1}, {b.y1}, {b.x2}, {b.y2} }}")
+            self._w(f"    points = {{ {{{b.x1}, {b.y1}}}, {{{b.x2}, {b.y2}}} }}")
             self._w(f"}})")
         if self.ir.beziers:
             self._w()
@@ -1522,9 +1525,62 @@ def _split_csv(line: str, max_parts: int = 0) -> list[str]:
     return parts
 
 
+_DISP_MAP: dict[str, str] = {
+    "workspace": "focus",
+    "movetoworkspace": "focus",
+}
+
+def _parse_window_rule_effect(effect_str: str) -> list[tuple[str, str]]:
+    """Parse a window rule effect into (key, value) pairs for Lua table.
+
+    Boolean effects (float, tile, center, etc.) become key = true.
+    Valued effects get their value normalized via normalize_val.
+    Multiple pairs are returned for compound effects like 'workspace 2 silent'.
+    """
+    raw = effect_str.strip()
+    if not raw:
+        return []
+
+    parts = raw.split()
+    name = parts[0]
+
+    # Known boolean-type effects
+    bool_effects = {
+        "float", "tile", "center", "noblur", "noshadow", "noanim",
+        "pin", "group", "stayfocused", "maximize", "noborder",
+        "noRounding", "norounding",
+    }
+    if name in bool_effects:
+        key = "no_rounding" if name in ("noRounding", "norounding") else name
+        return [(key, "true")]
+
+    if name == "unset":
+        return [("unset", "true")]
+
+    # Valued effect — need at least one value token
+    if len(parts) < 2:
+        return [(name, "true")]
+
+    # Handle workspace specially (can have "silent" modifier)
+    if name == "workspace":
+        ws_val = parts[1]
+        pairs = [("workspace", f'"{ws_val}"')]
+        if len(parts) > 2 and parts[2] == "silent":
+            pairs.append(("silent", "true"))
+        return pairs
+
+    # Strip all "override" tokens from the value
+    val_parts = [p for p in parts[1:] if p != "override"]
+    val = " ".join(val_parts)
+
+    # Let normalize_val handle quoting/color/bool detection
+    norm_val, _, _, _ = normalize_val(val, 0)
+    return [(name, norm_val)]
+
+
 def _dispatcher_to_lua(disp: str) -> str:
     """Map hyprland dispatcher name to Lua function name."""
-    return disp
+    return _DISP_MAP.get(disp.lower(), disp)
 
 
 def _fmt_dsp_param(param: str) -> str:

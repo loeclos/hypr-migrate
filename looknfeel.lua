@@ -33,19 +33,19 @@ hl.gesture({ fingers = 3, direction = "vertical", action = "workspace" })
 
 hl.curve("fluent_decel", {
     type = "bezier",
-    points = { 0.05, 0.9, 0.1, 1.1 }
+    points = { {0.05, 0.9}, {0.1, 1.1} }
 })
 hl.curve("easeOutCirc", {
     type = "bezier",
-    points = { 0.0, 0.55, 0.45, 1.0 }
+    points = { {0.0, 0.55}, {0.45, 1.0} }
 })
 hl.curve("easeOutCubic", {
     type = "bezier",
-    points = { 0.33, 1.0, 0.68, 1.0 }
+    points = { {0.33, 1.0}, {0.68, 1.0} }
 })
 hl.curve("easeinoutsine", {
     type = "bezier",
-    points = { 0.37, 0.0, 0.63, 1.0 }
+    points = { {0.37, 0.0}, {0.63, 1.0} }
 })
 
 hl.layer_rule({ match = { namespace = "match:namespace resolve" }, blur = false })
