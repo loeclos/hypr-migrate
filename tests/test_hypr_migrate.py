@@ -165,6 +165,18 @@ class TestParser(unittest.TestCase):
         self.assertEqual(len(dp1), 1)
         self.assertEqual(dp1[0].scale, 0.0)
 
+    def test_gestures_parsed(self):
+        ir = parse_fixture("15_gestures.conf")
+        self.assertEqual(len(ir.gestures), 1)
+        g = ir.gestures[0]
+        self.assertEqual(g.fingers, 3)
+        self.assertEqual(g.direction, "vertical")
+        self.assertEqual(g.action, "workspace")
+        self.assertIsNone(g.threshold)
+        # Should NOT appear as config_val
+        gesture_vals = [cv for cv in ir.config_vals if cv.key == "gesture"]
+        self.assertEqual(len(gesture_vals), 0)
+
     def test_variable_brace_syntax(self):
         """${name} syntax should resolve to variable value."""
         ir = parse_fixture("14_edge_cases.conf")
@@ -261,6 +273,18 @@ class TestEmitter(unittest.TestCase):
         self.assertIn("Empty monitor output", out)
         # Scale=0 emitted (old bug: falsy check dropped it)
         self.assertIn("scale = 0.0", out)
+
+    def test_gestures_in_output(self):
+        out = emit_fixture("15_gestures.conf")
+        self.assertIn("hl.gesture({", out)
+        self.assertIn("fingers = 3", out)
+        self.assertIn('direction = "vertical"', out)
+        self.assertIn('action = "workspace"', out)
+        # Should NOT be in hl.config
+        config_end = out.find("hl.config({")
+        if config_end >= 0:
+            config_section = out[config_end:out.find("})", config_end)]
+            self.assertNotIn("gesture", config_section)
 
     def test_no_silent_drops(self):
         """Every source line must produce output or annotation."""

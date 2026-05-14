@@ -202,6 +202,16 @@ class AnimationEntry:
 
 
 @dataclass
+class GestureEntry:
+    loc: SourceLoc
+    fingers: int
+    direction: str
+    action: str
+    threshold: Optional[int] = None
+    annotations: list[Annotation] = _ANNO()
+
+
+@dataclass
 class UnknownDirective:
     loc: SourceLoc
     raw: str
@@ -466,6 +476,22 @@ class HyprlangParser:
                 ))
             return
 
+        # gesture inside gestures section
+        if "=" in line and curr_sec and curr_sec.split(".")[-1] == "gestures":
+            key, val = _split_kv(line)
+            if key == "gesture":
+                parts = _split_csv(val, 4)
+                if len(parts) >= 3:
+                    fingers = _parse_int(parts[0], 3)
+                    direction = parts[1].strip()
+                    action = parts[2].strip()
+                    threshold = _parse_int(parts[3]) if len(parts) > 3 else None
+                    self.ir.gestures.append(GestureEntry(
+                        loc=loc, fingers=fingers, direction=direction,
+                        action=action, threshold=threshold,
+                    ))
+                    return
+
         # generic key=value inside a section → ConfigVal
         if "=" in line and curr_sec:
             key, val = _split_kv(line)
@@ -479,6 +505,15 @@ class HyprlangParser:
         # top-level k=v (might be legacy decoration= graphemes etc)
         if "=" in line:
             key, val = _split_kv(line)
+            if key == "gesture":
+                parts = _split_csv(val, 4)
+                if len(parts) >= 3:
+                    self.ir.gestures.append(GestureEntry(
+                        loc=loc, fingers=_parse_int(parts[0], 3),
+                        direction=parts[1].strip(), action=parts[2].strip(),
+                        threshold=_parse_int(parts[3]) if len(parts) > 3 else None,
+                    ))
+                    return
             cv = ConfigVal(
                 loc=loc, section="",
                 key=key.strip(), value=val.strip(), raw_value=val.strip(),
@@ -726,6 +761,7 @@ class HyprlangParser:
         ir.num_workspace_rules = len(ir.workspace_rules)
         ir.num_execs = len(ir.execs)
         ir.num_sources = len(ir.sources)
+        ir.num_gestures = len(ir.gestures)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -748,6 +784,7 @@ class ConfigIR:
     layer_rules: list[LayerRule] = field(default_factory=list)
     ws_binds: list[WsBindEntry] = field(default_factory=list)
     animations: list[AnimationEntry] = field(default_factory=list)
+    gestures: list[GestureEntry] = field(default_factory=list)
     unknown: list[UnknownDirective] = field(default_factory=list)
 
     num_variables: int = 0
@@ -760,6 +797,7 @@ class ConfigIR:
     num_workspace_rules: int = 0
     num_execs: int = 0
     num_sources: int = 0
+    num_gestures: int = 0
     num_warnings: int = 0
     num_notes: int = 0
 
@@ -768,7 +806,7 @@ class ConfigIR:
         return (self.variables + self.config_vals + self.monitors + self.binds +
                 self.window_rules + self.workspace_rules + self.envs + self.execs +
                 self.sources + self.beziers + self.layer_rules + self.ws_binds +
-                self.animations + self.unknown)
+                self.animations + self.gestures + self.unknown)
 
     def count_annotations(self, kind: str) -> int:
         return sum(
@@ -935,7 +973,7 @@ class Sorter:
 # ──────────────────────────────────────────────────────────────────────
 
 SECTION_ORDER = [
-    "general", "decoration", "input", "gestures", "misc",
+    "general", "decoration", "input", "misc",
     "binds", "xwayland", "debug", "opengl", "cursor", "render",
     "group", "dwindle", "master", "windowing",
 ]
@@ -959,6 +997,7 @@ class LuaEmitter:
         self._emit_envs()
         self._emit_sources()
         self._emit_config()
+        self._emit_gestures()
         self._emit_monitors()
         self._emit_workspace_rules()
         self._emit_window_rules()
@@ -1009,6 +1048,7 @@ class LuaEmitter:
         self._w(f"--   Window rules:    {ir.num_window_rules} total, {ir.num_window_rules_merged} merged")
         self._w(f"--   Workspace rules: {ir.num_workspace_rules}")
         self._w(f"--   Exec commands:   {ir.num_execs}")
+        self._w(f"--   Gestures:        {ir.num_gestures}")
         self._w(f"--   Warnings:        {w}  ← search MIGRATION_WARNING")
         self._w(f"--   Review needed:   {n}  ← search MIGRATION_NOTE")
         self._w(f"--")
@@ -1086,6 +1126,23 @@ class LuaEmitter:
         self._w("hl.config({")
         self._emit_nested_table(sections, 1)
         self._w("})")
+        self._w()
+
+    def _emit_gestures(self):
+        if not self.ir.gestures:
+            return
+        for g in self.ir.gestures:
+            for a in g.annotations:
+                self._w(f"-- {a.kind}: {a.message}")
+            fields = [
+                f"fingers = {g.fingers}",
+                f'direction = "{g.direction}"',
+                f'action = "{g.action}"',
+            ]
+            if g.threshold is not None:
+                fields.append(f"threshold = {g.threshold}")
+            body = ", ".join(fields)
+            self._w(f"hl.gesture({{ {body} }})")
         self._w()
 
     def _emit_nested_table(self, tbl: dict, indent: int):
